@@ -393,48 +393,55 @@ func Test_IssueRead_IFC_InsidersMode(t *testing.T) {
 }
 
 func Test_GetIssue_FieldValues(t *testing.T) {
-	// Verify that issue_field_values from the REST API are present in the returned object.
+	// Verify that field_values (resolved via GraphQL) are returned for get_issue.
 	serverTool := IssueRead(translations.NullTranslationHelper)
 
-	mockIssueWithFields := &github.Issue{
+	mockIssue := &github.Issue{
 		Number:  github.Ptr(99),
 		Title:   github.Ptr("Issue with field values"),
 		Body:    github.Ptr("body"),
 		State:   github.Ptr("open"),
 		HTMLURL: github.Ptr("https://github.com/owner/repo/issues/99"),
-		User: &github.User{
-			Login: github.Ptr("testuser"),
-		},
-		IssueFieldValues: []*github.IssueFieldValue{
-			{
-				IssueFieldID: 1001,
-				NodeID:       "FV_node_1",
-				DataType:     "single_select",
-				Value:        "High",
-				SingleSelectOption: &github.IssueFieldValueSingleSelectOption{
-					ID:    42,
-					Name:  "High",
-					Color: "red",
-				},
-			},
-			{
-				IssueFieldID: 1002,
-				NodeID:       "FV_node_2",
-				DataType:     "text",
-				Value:        "some text value",
-			},
-		},
+		NodeID:  github.Ptr("I_node_99"),
+		User:    &github.User{Login: github.Ptr("testuser")},
 	}
 
-	mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
-		GetReposIssuesByOwnerByRepoByIssueNumber: mockResponse(t, http.StatusOK, mockIssueWithFields),
+	restClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+		GetReposIssuesByOwnerByRepoByIssueNumber: mockResponse(t, http.StatusOK, mockIssue),
 	})
+
+	gqlVars := map[string]any{"ids": []any{"I_node_99"}}
+	gqlResponse := githubv4mock.DataResponse(map[string]any{
+		"nodes": []map[string]any{
+			{
+				"id": "I_node_99",
+				"issueFieldValues": map[string]any{
+					"nodes": []map[string]any{
+						{
+							"__typename": "IssueFieldSingleSelectValue",
+							"field":      map[string]any{"name": "priority"},
+							"value":      "High",
+						},
+						{
+							"__typename": "IssueFieldTextValue",
+							"field":      map[string]any{"name": "notes"},
+							"value":      "some text value",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	const nodesQueryString = "query($ids:[ID!]!){nodes(ids: $ids){... on Issue{id,issueFieldValues(first: 25){nodes{__typename,... on IssueFieldDateValue{field{... on IssueFieldDate{name},... on IssueFieldNumber{name},... on IssueFieldSingleSelect{name},... on IssueFieldText{name}},value},... on IssueFieldNumberValue{field{... on IssueFieldDate{name},... on IssueFieldNumber{name},... on IssueFieldSingleSelect{name},... on IssueFieldText{name}},valueNumber: value},... on IssueFieldSingleSelectValue{field{... on IssueFieldDate{name},... on IssueFieldNumber{name},... on IssueFieldSingleSelect{name},... on IssueFieldText{name}},value},... on IssueFieldTextValue{field{... on IssueFieldDate{name},... on IssueFieldNumber{name},... on IssueFieldSingleSelect{name},... on IssueFieldText{name}},value}}}}}}"
+	matcher := githubv4mock.NewQueryMatcher(nodesQueryString, gqlVars, gqlResponse)
+	gqlClient := githubv4.NewClient(githubv4mock.NewMockedHTTPClient(matcher))
 
 	cache := stubRepoAccessCache(nil, 15*time.Minute)
 	flags := stubFeatureFlags(map[string]bool{"lockdown-mode": false})
 	deps := BaseDeps{
-		Client:          mustNewGHClient(t, mockedClient),
-		GQLClient:       defaultGQLClient,
+		Client:          mustNewGHClient(t, restClient),
+		GQLClient:       gqlClient,
 		RepoAccessCache: cache,
 		Flags:           flags,
 	}
@@ -448,32 +455,17 @@ func Test_GetIssue_FieldValues(t *testing.T) {
 	})
 	result, err := handler(ContextWithDeps(context.Background(), deps), &request)
 	require.NoError(t, err)
-	require.NotNil(t, result)
+	require.False(t, result.IsError, "expected result to not be an error")
 
 	textContent := getTextResult(t, result)
 
 	var returnedIssue MinimalIssue
-	err = json.Unmarshal([]byte(textContent.Text), &returnedIssue)
-	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal([]byte(textContent.Text), &returnedIssue))
 
-	require.Len(t, returnedIssue.IssueFieldValues, 2, "expected two issue field values")
-
-	first := returnedIssue.IssueFieldValues[0]
-	assert.Equal(t, int64(1001), first.IssueFieldID)
-	assert.Equal(t, "FV_node_1", first.NodeID)
-	assert.Equal(t, "single_select", first.DataType)
-	assert.Equal(t, "High", first.Value)
-	require.NotNil(t, first.SingleSelectOption)
-	assert.Equal(t, int64(42), first.SingleSelectOption.ID)
-	assert.Equal(t, "High", first.SingleSelectOption.Name)
-	assert.Equal(t, "red", first.SingleSelectOption.Color)
-
-	second := returnedIssue.IssueFieldValues[1]
-	assert.Equal(t, int64(1002), second.IssueFieldID)
-	assert.Equal(t, "FV_node_2", second.NodeID)
-	assert.Equal(t, "text", second.DataType)
-	assert.Equal(t, "some text value", second.Value)
-	assert.Nil(t, second.SingleSelectOption)
+	assert.Equal(t, []MinimalFieldValue{
+		{Field: "priority", Value: "High"},
+		{Field: "notes", Value: "some text value"},
+	}, returnedIssue.FieldValues)
 }
 
 func Test_AddIssueComment(t *testing.T) {

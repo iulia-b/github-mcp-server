@@ -584,6 +584,17 @@ func GetIssue(ctx context.Context, client *github.Client, deps ToolDependencies,
 
 	minimalIssue := convertToMinimalIssue(issue)
 
+	// Enrich with named field values via a single GraphQL nodes() round-trip.
+	gqlClient, err := deps.GetGQLClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GitHub GraphQL client: %w", err)
+	}
+	fieldValuesByID, err := fetchIssueFieldValuesByNodeID(ctx, gqlClient, []*github.Issue{issue})
+	if err != nil {
+		return ghErrors.NewGitHubGraphQLErrorResponse(ctx, "failed to fetch issue field values", err), nil
+	}
+	minimalIssue.FieldValues = fieldValuesByID[issue.GetNodeID()]
+
 	return MarshalledTextResult(minimalIssue), nil
 }
 
